@@ -121,13 +121,16 @@ class TableExtractor:
             # Sort by reading order if not already (assuming dots_ocr output is sorted)
             # The prompt instructions say "All layout elements must be sorted according to human reading order."
 
-            for element in layout_data:
-                if element.get('category') == 'Table':
-                    html_content = element.get('text', '')
-                    if html_content:
-                        table_df = self._html_to_dataframe(html_content)
-                        if table_df is not None and not table_df.empty:
-                            all_tables.append(table_df)
+            if isinstance(layout_data, list):
+                for element in layout_data:
+                    if isinstance(element, dict) and element.get('category') == 'Table':
+                        html_content = element.get('text', '')
+                        if html_content:
+                            table_df = self._html_to_dataframe(html_content)
+                            if table_df is not None and not table_df.empty:
+                                all_tables.append(table_df)
+            else:
+                print(f"Warning: Unexpected layout data format in {layout_info_path}. Expected list, got {type(layout_data)}")
 
         if not all_tables:
             print(f"No tables found in {pdf_path}.")
