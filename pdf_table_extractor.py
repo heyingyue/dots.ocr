@@ -157,7 +157,11 @@ class TableExtractor:
             # Use StringIO to avoid FutureWarning
             dfs = pd.read_html(StringIO(html_content))
             if dfs:
-                return dfs[0]
+                df = dfs[0]
+                # Flatten MultiIndex columns if present
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [' '.join(map(str, col)).strip() for col in df.columns.values]
+                return df
         except Exception as e:
             print(f"Error converting HTML to DataFrame: {e}")
         return None
@@ -171,7 +175,7 @@ class TableExtractor:
             return pd.DataFrame()
 
         if len(tables) == 1:
-            return tables[0]
+            return self._clean_dataframe(tables[0])
 
         merged_df = tables[0]
 
@@ -181,8 +185,6 @@ class TableExtractor:
             # Check if columns match
             if list(merged_df.columns) == list(current_df.columns):
                 # If columns match exactly, just append
-                # But sometimes the header is repeated as the first row in data if read_html didn't detect it as header
-                # Or read_html detected it as header, so columns match.
                 merged_df = pd.concat([merged_df, current_df], ignore_index=True)
             else:
                 # If columns don't match, it might be that the second table has no header
@@ -190,8 +192,6 @@ class TableExtractor:
 
                 # Heuristic: If number of columns is the same, assume it's continuation
                 if len(merged_df.columns) == len(current_df.columns):
-                    # Check if the first row of current_df looks like the header of merged_df
-                    # If so, drop it.
 
                     # If current_df columns are integers (0, 1, 2...), it means no header was found.
                     # We can assign merged_df columns to it.
@@ -200,25 +200,68 @@ class TableExtractor:
                          merged_df = pd.concat([merged_df, current_df], ignore_index=True)
                     else:
                         # Columns are strings but different.
-                        # This happens when read_html treats the first row of a headerless continuation table as a header.
-                        # We need to preserve this "header" as a data row.
+                        # It could be a REPEATED header (OCR error/slight diff) or DATA.
 
-                        # Convert headers to a dataframe row
-                        header_row = pd.DataFrame([current_df.columns], columns=merged_df.columns)
-                        # Fix current_df columns
-                        current_df.columns = merged_df.columns
-                        # Concatenate: merged + header_as_row + current_df data
-                        merged_df = pd.concat([merged_df, header_row, current_df], ignore_index=True)
+                        # Simple heuristic: compare similarity of column names to merged_df columns.
+                        # If highly similar, assume it's a header and skip inserting it as data.
+
+                        is_header = False
+                        # Check intersection of words or exact match ratio
+                        col_str1 = " ".join([str(c) for c in merged_df.columns])
+                        col_str2 = " ".join([str(c) for c in current_df.columns])
+
+                        # If more than 50% of the words are common, it's likely a header
+                        # A better check: check if key columns like "NO", "NAME" are present
+                        header_keywords = ["NO", "NAME", "FORMULA", "CAS", "TMIN", "TMAX", "A", "B", "C", "D"]
+                        matches = sum(1 for k in header_keywords if k in str(current_df.columns))
+                        if matches >= 2:
+                            is_header = True
+
+                        if is_header:
+                            # It is a header, just update columns and concat data
+                            current_df.columns = merged_df.columns
+                            merged_df = pd.concat([merged_df, current_df], ignore_index=True)
+                        else:
+                            # Not a header (likely data read as header because of no thead)
+                            # Convert headers to a dataframe row
+                            header_row = pd.DataFrame([current_df.columns], columns=merged_df.columns)
+                            # Fix current_df columns
+                            current_df.columns = merged_df.columns
+                            # Concatenate: merged + header_as_row + current_df data
+                            merged_df = pd.concat([merged_df, header_row, current_df], ignore_index=True)
                 else:
                     # Column count mismatch.
-                    # This is tricky. Might be a different table or OCR error.
-                    # We will append it anyway, but with outer join (pandas default for concat)
-                    # OR we can warn and skip.
-                    # Given the task "merge... into one csv", we probably should concat.
                     print(f"Warning: Table {i} has different column count ({len(current_df.columns)}) vs previous ({len(merged_df.columns)}). Concatenating anyway.")
                     merged_df = pd.concat([merged_df, current_df], ignore_index=True)
 
-        return merged_df
+        return self._clean_dataframe(merged_df)
+
+    def _clean_dataframe(self, df):
+        """
+        Remove rows that look like repeated headers, footer text, or artifacts.
+        """
+        def is_valid_row(row):
+            # Convert row to string to check content
+            row_str = " ".join([str(x) for x in row.values])
+
+            # Check for header artifacts (e.g. tuple strings from MultiIndex)
+            if "('NO', 'NO')" in row_str or "('FORMULA', 'FORMULA')" in row_str:
+                return False
+
+            # Check for repeated headers
+            # If the row contains multiple header keywords
+            header_keywords = ["NO", "NAME", "FORMULA", "CAS No", "TMIN", "TMAX"]
+            matches = sum(1 for k in header_keywords if k in row_str)
+            if matches >= 3:
+                return False
+
+            # Check for footer/legend text
+            if "code: 1 - data" in row_str or "kgas - thermal conductivity" in row_str:
+                return False
+
+            return True
+
+        return df[df.apply(is_valid_row, axis=1)]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract and merge tables from PDFs using dots_ocr.")
