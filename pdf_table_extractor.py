@@ -5,6 +5,7 @@ import pandas as pd
 from io import StringIO
 import json
 import warnings
+import requests
 
 # Import dots_ocr components
 from dots_ocr.parser import DotsOCRParser
@@ -19,15 +20,58 @@ class TableExtractor:
                  output_dir='./output',
                  dpi=200):
         self.output_dir = output_dir
+
+        # Verify and fetch the correct model name from vLLM
+        resolved_model = self._resolve_model_name(vllm_ip, vllm_port, vllm_model)
+        if resolved_model != vllm_model:
+            print(f"Switching model from '{vllm_model}' to '{resolved_model}'")
+
         self.parser = DotsOCRParser(
             ip=vllm_ip,
             port=vllm_port,
-            model_name=vllm_model,
+            model_name=resolved_model,
             num_thread=num_thread,
             dpi=dpi,
             output_dir=output_dir,
             protocol='http', # Assuming http as per user instruction "already deployed"
         )
+
+    def _resolve_model_name(self, ip, port, requested_model):
+        """
+        Query vLLM for available models. If requested_model is not found,
+        try to pick a reasonable default.
+        """
+        url = f"http://{ip}:{port}/v1/models"
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                available_models = [m['id'] for m in data.get('data', [])]
+                print(f"Available models on vLLM: {available_models}")
+
+                if requested_model in available_models:
+                    return requested_model
+
+                # If only one model is available, use it
+                if len(available_models) == 1:
+                    print(f"Model '{requested_model}' not found. Using the only available model: '{available_models[0]}'")
+                    return available_models[0]
+
+                # If multiple models, look for one that looks like 'dots' or 'ocr'
+                for m in available_models:
+                    if 'dots' in m.lower() and 'ocr' in m.lower():
+                        print(f"Model '{requested_model}' not found. Found similar model: '{m}'")
+                        return m
+
+                # Fallback to the first one if we can't match
+                if available_models:
+                    print(f"Model '{requested_model}' not found. Falling back to: '{available_models[0]}'")
+                    return available_models[0]
+
+        except Exception as e:
+            print(f"Warning: Could not connect to vLLM to list models ({e}). Using provided model name: '{requested_model}'")
+
+        return requested_model
 
     def process_folder(self, folder_path):
         """
